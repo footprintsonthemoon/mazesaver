@@ -28,9 +28,10 @@ Want the actual macOS screensaver instead? Jump to [Installation](#-installation
 
 ## 🎬 Demo
 
-<video src="Assets/README/demo.mov" controls width="100%">
-Your browser doesn't support inline video — <a href="Assets/README/demo.mov">download the clip</a> instead.
-</video>
+[![Watch the demo](Assets/README/demo-thumbnail.png)](Assets/README/demo.mov)
+
+*(click the image to play the video — a Wall Follower vs. Depth-First
+Search race, shown above)*
 
 ---
 
