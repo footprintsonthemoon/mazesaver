@@ -208,11 +208,19 @@ No build tools needed. Grab the latest zips from
 - **App** — download `MazeSaver-App.zip`, unzip, then drag `MazeSaver.app`
   into `/Applications`.
 
-> These builds are ad-hoc signed, not notarized with a paid Developer ID —
-> on first launch macOS Gatekeeper will say it's from an unidentified
-> developer. **Right-click (or Control-click) the file and choose *Open***
-> instead of double-clicking, confirm once, and it'll launch normally every
-> time after that.
+> These builds are ad-hoc signed, not notarized with a paid Developer ID.
+> On current macOS, Gatekeeper usually refuses outright ("Apple could not
+> verify that ... is free of malware") rather than offering an *Open
+> Anyway* option — right-click → Open doesn't reliably get around this
+> anymore. Clear the quarantine flag once instead, then it opens normally
+> from then on:
+> ```bash
+> xattr -cr /path/to/MazeSaver.app       # or MazeSaver.saver
+> ```
+> If you'd rather not use Terminal: open **System Settings → Privacy &
+> Security**, scroll down, and look for a "MazeSaver was blocked" line with
+> an **Open Anyway** button — it only appears *after* you've tried to open
+> it once and hit the block dialog.
 >
 > macOS also runs third-party screensavers through a compatibility layer
 > (`legacyScreenSaver`) rather than as a first-class extension these days —
