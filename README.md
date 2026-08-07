@@ -192,41 +192,65 @@ Every few mazes, the normal rotation is interrupted:
 
 ## 📦 Installation
 
+### Option A: just download it
+
+No build tools needed. Grab the latest zips from
+**[Releases](https://github.com/footprintsonthemoon/mazesaver/releases/latest)**:
+
+- **Screensaver** — download `MazeSaver-Screensaver.zip`, unzip, then:
+  ```bash
+  cp -R MazeSaver.saver ~/Library/Screen\ Savers/
+  ```
+  Then: **System Settings → Screen Saver → MazeSaver**.
+
+- **App** — download `MazeSaver-App.zip`, unzip, then drag `MazeSaver.app`
+  into `/Applications`.
+
+> These builds are ad-hoc signed, not notarized with a paid Developer ID —
+> on first launch macOS Gatekeeper will say it's from an unidentified
+> developer. **Right-click (or Control-click) the file and choose *Open***
+> instead of double-clicking, confirm once, and it'll launch normally every
+> time after that.
+>
+> macOS also runs third-party screensavers through a compatibility layer
+> (`legacyScreenSaver`) rather than as a first-class extension these days —
+> the classic `.saver` bundle format still works, it's just not something
+> Apple is actively investing in anymore.
+
+### Option B: build it yourself
+
 Only the Xcode **Command Line Tools** are required — not the Xcode app.
 
 ```bash
 xcode-select --install   # if you don't already have them
-```
-
-### Screensaver
-
-```bash
 git clone https://github.com/footprintsonthemoon/mazesaver.git
 cd mazesaver
+```
+
+**Screensaver:**
+
+```bash
 ./Scripts/build-saver.sh
 cp -R build/MazeSaver.saver ~/Library/Screen\ Savers/
 ```
 
 Then: **System Settings → Screen Saver → MazeSaver**.
 
-> macOS runs third-party screensavers through a compatibility layer
-> (`legacyScreenSaver`) rather than as a first-class extension these days —
-> the classic `.saver` bundle format still works, it's just not something
-> Apple is actively investing in anymore. The build is ad-hoc signed, which
-> is fine for running it on your own Mac; distributing it to others would
-> need a Developer ID signature and notarization.
-
-### Standalone app
+**Standalone app:**
 
 ```bash
-git clone https://github.com/footprintsonthemoon/mazesaver.git
-cd mazesaver
 ./Scripts/build-app.sh
 open build/MazeSaver.app
 ```
 
 Drag `build/MazeSaver.app` into `/Applications` to keep it around. The
 window is resizable — the maze regenerates to fit whatever size you give it.
+
+**Both at once, zipped up like the release assets:**
+
+```bash
+./Scripts/build-release.sh
+```
 
 ### Development
 
