@@ -150,10 +150,18 @@ way through a physical maze.
 ### Random Walk ("chaos mode")
 
 No memory, no strategy — picks a random open direction each step (with a
-mild bias against immediately reversing). Capped and, in the rare case it
-doesn't reach the exit in time, backed by a safety-net shortest path so the
-screensaver never stalls. Doesn't take part in the normal rotation; it shows
-up on its own as an occasional surprise (see below).
+mild bias against immediately reversing). Doesn't take part in the normal
+rotation; it shows up on its own as an occasional surprise (see below).
+
+Cover time for a true random walk can, in the worst case, be very large, so
+the step count is capped (scaled to the maze size, up to 200,000 steps) as a
+safety net so the screensaver never stalls on one maze for minutes. If the
+cap is hit before the exit is actually found — which can happen, especially
+on larger mazes/screens — the travel replay falls back to the shortest path
+instead. You'll notice this as the search visibly cutting off partway
+through, followed by the ball taking a cleaner, more direct route than what
+was actually explored. It's an inherent tradeoff of capping an
+uninformed random walk, not a bug.
 
 ---
 
