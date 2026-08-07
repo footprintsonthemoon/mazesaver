@@ -28,7 +28,7 @@ Want the actual macOS screensaver instead? Jump to [Installation](#-installation
 
 ## 🎬 Demo
 
-[![Watch the demo](Assets/README/demo-thumbnail.png)](https://raw.githubusercontent.com/footprintsonthemoon/mazesaver/main/Assets/README/demo.mov)
+[![Watch the demo](Assets/README/demo-thumbnail.png)](https://raw.githubusercontent.com/footprintsonthemoon/mazesaver/main/Assets/README/demo.mp4)
 
 *(click the image to download and watch the video — a Wall Follower vs.
 Depth-First Search race, shown above. GitHub's file preview doesn't handle
