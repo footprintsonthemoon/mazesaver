@@ -17,6 +17,15 @@ struct Runner {
 /// the new entrance so the journey feels continuous across mazes.
 public final class MazeEngine {
     enum Phase: Equatable {
+        /// Just the entrance point, pulsing quietly — before any maze structure
+        /// is drawn at all. A calm beat marking "here's where it starts."
+        case arriving
+        /// The maze visibly carves itself into existence, replaying the exact
+        /// sequence the generator used — a quick prelude before the search starts.
+        case building
+        /// A calm beat once construction is done and before the search begins —
+        /// otherwise the build finishing and the search starting blur together.
+        case builtPause
         case searching
         /// A brief, deliberate pause once the search is done and before the ball
         /// sets off — without it, search-done and travel-start blur together and
@@ -26,7 +35,10 @@ public final class MazeEngine {
         /// The ball has reached the exit and rests there a moment before the maze
         /// dissolves into the next one — a beat to register "arrived" before it goes.
         case arrived
-        case betweenMazes
+        /// The maze itself is gone — just the pulsing ball, sliding off the exit
+        /// edge while its mirror image slides in from the opposite edge (matching
+        /// the entrance/exit continuity), like it wrapped around to the next maze.
+        case wrapping
     }
 
     let cols: Int
@@ -37,15 +49,32 @@ public final class MazeEngine {
     private(set) var exit: EdgeOpening
     private(set) var generatorKind: MazeGeneratorKind
     private(set) var runners: [Runner]
-    private(set) var phase: Phase = .searching
+    private(set) var phase: Phase = .arriving
+
+    /// The exact wall-removal sequence the generator used for the current maze,
+    /// and how far into it the "under construction" reveal has gotten.
+    private(set) var carveSteps: [CarveStep]
+    private(set) var builtCount = 0
+    private var buildAccumulator: Double = 0
+    private var pendingCarveSteps: [CarveStep]?
 
     /// Set to the index of whichever runner reaches the goal first in a race, so
     /// the view can show a "X wins" banner. Nil outside of races.
     private(set) var winnerRunnerIndex: Int?
 
-    /// The next maze's structure, generated ahead of time so it can be crossfaded
-    /// in while the old maze (still held in `grid`/`entrance`/`exit`/`runners`)
-    /// fades out, instead of a hard cut. Only non-nil during `.betweenMazes`.
+    /// The algorithm that was running just before the current maze — captured at
+    /// the moment of the swap so the view can fade the ball from that color into
+    /// the new maze's algorithm color over the build animation, instead of
+    /// snapping straight to it.
+    private(set) var previousLeadKind: SearchAlgorithmKind?
+
+    var leadRunnerIndex: Int {
+        isRace ? (winnerRunnerIndex ?? 0) : 0
+    }
+
+    /// The next maze's structure, generated ahead of time so its entrance position
+    /// is already known for the `.wrapping` ball animation to land on. Only non-nil
+    /// during `.wrapping`.
     private(set) var pendingGrid: MazeGrid?
     private(set) var pendingEntrance: EdgeOpening?
     private(set) var pendingExit: EdgeOpening?
@@ -58,19 +87,50 @@ public final class MazeEngine {
 
     var isRace: Bool { runners.count > 1 }
 
-    private var transitionTimer: Double = 0
+    private var wrapTimer: Double = 0
+    private var arrivingTimer: Double = 0
+    private var builtPauseTimer: Double = 0
     private var settlingTimer: Double = 0
     private var arrivedTimer: Double = 0
 
-    /// 0 at the start of the crossfade, 1 once the new maze has fully faded in.
-    var transitionProgress: Double {
-        phase == .betweenMazes ? min(1, transitionTimer / transitionDuration) : 0
+    /// 0 at the start of the wrap animation, 1 once the ball has fully "arrived"
+    /// on the opposite edge.
+    var wrapProgress: Double {
+        phase == .wrapping ? min(1, wrapTimer / wrapDuration) : 0
+    }
+
+    /// Seconds into `.wrapping`, for the view's brief old-maze fade-out — 0
+    /// outside of that phase.
+    var wrapElapsed: Double {
+        phase == .wrapping ? wrapTimer : 0
+    }
+
+    /// Total length of `.wrapping`, so the view can carve its own fade/pause/slide
+    /// sub-timeline out of it without duplicating the constant.
+    var wrapTotalDuration: Double {
+        wrapDuration
+    }
+
+    /// Seconds into the `.arriving` pulse, for the view to derive its ping
+    /// animation from — 0 outside of that phase.
+    var arrivingElapsed: Double {
+        phase == .arriving ? arrivingTimer : 0
     }
 
     // Deliberately unhurried — this runs as a screensaver, not a race against the
     // clock, so it should read as calm and ambient rather than snappy.
+    private let arrivingDuration: Double = 1.8
     private let baseCellsRevealedPerSecond: Double = 12
     private let maxRevealDuration: Double = 18
+    /// Kept short and size-independent on purpose — this is a quick visual
+    /// prelude, not something to linger on the way the search reveal does.
+    private let baseBuildRevealPerSecond: Double = 60
+    private let buildDuration: Double = 5
+    /// Long enough for the exit marker's own 2s hidden delay plus its brief
+    /// fade-in/pulse, plus a calm extra beat once it's visible and pulsing,
+    /// before the search actually starts — see MazeView's
+    /// exitAppearDelayDuration/exitFadeInDuration.
+    private let builtPauseDuration: Double = 4
     private let settlingDuration: Double = 2
     private let arrivedDuration: Double = 5
     private let ballCellsPerSecond: Double = 7
@@ -78,7 +138,11 @@ public final class MazeEngine {
     /// actual race (searching) is easy to follow. The final travel replay — done by
     /// just the winner once the race is decided — runs at the normal solo pace.
     private let raceSpeedMultiplier: Double = 0.55
-    private let transitionDuration: Double = 1.4
+    /// Slow and visible on purpose — this is the whole "one continuous corridor"
+    /// illusion happening, not something to rush past. Long enough for the view's
+    /// own fade-out + pause + slide choreography (see MazeView.drawWrapAnimation)
+    /// to each get a comfortable, unhurried share of it.
+    private let wrapDuration: Double = 4.5
     private let chaosProbability: Double = 0.1
     private let raceProbability: Double = 0.25
     /// However unlucky the dice are, force a race/chaos maze at least this often
@@ -171,10 +235,11 @@ public final class MazeEngine {
         self.generatorKind = generatorKind
 
         let startEntrance = EdgeOpening(side: .west, index: Int.random(in: 0..<rows))
-        let (initialGrid, initialExit) = MazeEngine.generateMaze(kind: generatorKind, cols: cols, rows: rows, entrance: startEntrance)
+        let (initialGrid, initialExit, initialCarveSteps) = MazeEngine.generateMaze(kind: generatorKind, cols: cols, rows: rows, entrance: startEntrance)
         self.grid = initialGrid
         self.entrance = startEntrance
         self.exit = initialExit
+        self.carveSteps = initialCarveSteps
 
         // The very first maze is always a plain single-algorithm one; chaos/race
         // modes only kick in from the second maze onward (see startNextMaze).
@@ -195,10 +260,10 @@ public final class MazeEngine {
         ]
     }
 
-    private static func generateMaze(kind: MazeGeneratorKind, cols: Int, rows: Int, entrance: EdgeOpening) -> (MazeGrid, EdgeOpening) {
+    private static func generateMaze(kind: MazeGeneratorKind, cols: Int, rows: Int, entrance: EdgeOpening) -> (MazeGrid, EdgeOpening, [CarveStep]) {
         let grid = MazeGrid(cols: cols, rows: rows)
         var rng: RandomNumberGenerator = SystemRandomNumberGenerator()
-        MazeGenerator.generate(kind: kind, grid: grid, start: grid.position(of: entrance), rng: &rng)
+        let carveSteps = MazeGenerator.generate(kind: kind, grid: grid, start: grid.position(of: entrance), rng: &rng)
 
         let exitSide = Side.allCases.filter { $0 != entrance.side }.randomElement()!
         let exitIndex: Int
@@ -210,7 +275,7 @@ public final class MazeEngine {
 
         grid.openBorder(entrance)
         grid.openBorder(exit)
-        return (grid, exit)
+        return (grid, exit, carveSteps)
     }
 
     private func revealRate(forVisitedCount count: Int) -> Double {
@@ -221,6 +286,27 @@ public final class MazeEngine {
     /// Advances the simulation by `dt` seconds.
     func tick(dt: Double) {
         switch phase {
+        case .arriving:
+            arrivingTimer += dt
+            if arrivingTimer >= arrivingDuration {
+                phase = .building
+            }
+
+        case .building:
+            let rate = max(baseBuildRevealPerSecond, Double(carveSteps.count) / buildDuration)
+            buildAccumulator += rate * dt
+            builtCount = min(carveSteps.count, Int(buildAccumulator))
+            if builtCount >= carveSteps.count {
+                phase = .builtPause
+                builtPauseTimer = 0
+            }
+
+        case .builtPause:
+            builtPauseTimer += dt
+            if builtPauseTimer >= builtPauseDuration {
+                phase = .searching
+            }
+
         case .searching:
             for i in runners.indices {
                 let total = runners[i].searchResult.visitedOrder.count
@@ -268,9 +354,9 @@ public final class MazeEngine {
                 beginTransition()
             }
 
-        case .betweenMazes:
-            transitionTimer += dt
-            if transitionTimer >= transitionDuration {
+        case .wrapping:
+            wrapTimer += dt
+            if wrapTimer >= wrapDuration {
                 commitPendingMaze()
             }
         }
@@ -281,7 +367,7 @@ public final class MazeEngine {
     private func beginTransition() {
         let newEntrance = EdgeOpening(side: exit.side.opposite, index: exit.index)
         let newGeneratorKind = nextGeneratorKind()
-        let (newGrid, newExit) = MazeEngine.generateMaze(kind: newGeneratorKind, cols: cols, rows: rows, entrance: newEntrance)
+        let (newGrid, newExit, newCarveSteps) = MazeEngine.generateMaze(kind: newGeneratorKind, cols: cols, rows: rows, entrance: newEntrance)
 
         let kinds = pickAlgorithmKinds()
         pendingRunners = MazeEngine.buildRunners(
@@ -295,30 +381,42 @@ public final class MazeEngine {
         pendingGeneratorKind = newGeneratorKind
         pendingEntrance = newEntrance
         pendingExit = newExit
+        pendingCarveSteps = newCarveSteps
 
-        transitionTimer = 0
-        phase = .betweenMazes
+        wrapTimer = 0
+        phase = .wrapping
     }
 
-    /// Swaps the faded-in pending maze into place and starts its search.
+    /// Swaps the pending maze into place once the wrap animation lands on it, and
+    /// starts the arrival ping ahead of its build animation.
     private func commitPendingMaze() {
         guard let newGrid = pendingGrid, let newEntrance = pendingEntrance, let newExit = pendingExit,
-              let newGeneratorKind = pendingGeneratorKind, let newRunners = pendingRunners else { return }
+              let newGeneratorKind = pendingGeneratorKind, let newRunners = pendingRunners,
+              let newCarveSteps = pendingCarveSteps else { return }
+
+        if runners.indices.contains(leadRunnerIndex) {
+            previousLeadKind = runners[leadRunnerIndex].kind
+        }
 
         grid = newGrid
         generatorKind = newGeneratorKind
         entrance = newEntrance
         exit = newExit
         runners = newRunners
+        carveSteps = newCarveSteps
+        builtCount = 0
+        buildAccumulator = 0
 
         pendingGrid = nil
         pendingEntrance = nil
         pendingExit = nil
         pendingGeneratorKind = nil
         pendingRunners = nil
+        pendingCarveSteps = nil
 
         winnerRunnerIndex = nil
-        phase = .searching
+        arrivingTimer = 0
+        phase = .arriving
         mazeGeneration += 1
     }
 
@@ -343,9 +441,9 @@ public final class MazeEngine {
     func ballPosition(runnerIndex: Int) -> (col: Double, row: Double) {
         let runner = runners[runnerIndex]
         switch phase {
-        case .searching, .settling:
+        case .arriving, .building, .builtPause, .searching, .settling:
             return interpolatedPosition(along: runner.searchResult.visitedOrder, progress: runner.revealAccumulator)
-        case .traveling, .arrived, .betweenMazes:
+        case .traveling, .arrived, .wrapping:
             return interpolatedPosition(along: runner.searchResult.path, progress: runner.pathProgress)
         }
     }

@@ -30,9 +30,10 @@ Want the actual macOS screensaver instead? Jump to [Installation](#-installation
 
 [![Watch the demo](Assets/README/demo-thumbnail.png)](https://raw.githubusercontent.com/footprintsonthemoon/mazesaver/main/Assets/README/demo.mp4)
 
-*(click the image to download and watch the video — a Wall Follower vs.
-Depth-First Search race, shown above. GitHub's file preview doesn't handle
-a clip this size, so it downloads rather than playing inline.)*
+*(click the image to download and watch the video — several mazes being
+built, solved, and handed off to the next one, shown above. GitHub's file
+preview doesn't handle a clip this size, so it downloads rather than
+playing inline.)*
 
 ---
 
@@ -60,8 +61,19 @@ Everything after that is watching the algorithms work.
 
 ```
 +-------------------------------------------+
-|  Generate maze                             |
-|  (previous exit becomes the new entrance)   |
+|  Build                                      |
+|  the maze visibly carves itself into        |
+|  existence, replaying the generator's        |
+|  actual carving order                        |
++---------------------+-----------------------+
+                      |
+                      v
++-------------------------------------------+
+|  Pause                                      |
+|  a calm beat once construction is done;      |
+|  the exit stays hidden for 2s, then fades    |
+|  in and starts pulsing — "waiting to be      |
+|  found" — before the search begins           |
 +---------------------+-----------------------+
                       |
                       v
@@ -69,7 +81,7 @@ Everything after that is watching the algorithms work.
 |  Search                                     |
 |  DFS / BFS / A* / Wall Follower /           |
 |  Random Walk — ball rides the search        |
-|  frontier, colored per algorithm            |
+|  frontier, colored per algorithm             |
 +---------------------+-----------------------+
                       |
                       v
@@ -77,14 +89,26 @@ Everything after that is watching the algorithms work.
 |  Settle (2s) -> Travel -> Arrived (5s)      |
 |  solution trail is drawn as the ball walks  |
 |  it, over the search pattern, not replacing |
-|  it; arrival stats shown before moving on   |
+|  it; the exit marker switches from green to |
+|  the algorithm's color the instant the path |
+|  is found                                    |
 +---------------------+-----------------------+
                       |
                       v
 +-------------------------------------------+
-|  Crossfade into the next maze               |
+|  Wrap around                                |
+|  the maze fades out; the ball slides off    |
+|  the exit edge while its mirror slides in   |
+|  from the opposite edge of the next maze —  |
+|  same corridor, wrapping around the screen  |
 +-------------------------------------------+
 ```
+
+The exit is *only ever* drawn green while nobody has found it yet — a neutral
+"goal" beacon. The entrance marker, and the exit the moment it's found, are
+always drawn in whichever algorithm's color is currently leading, and the
+ball itself eases from the previous maze's algorithm color into the new
+one's while the next maze builds.
 
 ---
 
@@ -170,7 +194,7 @@ uninformed random walk, not a bug.
 Every few mazes, the normal rotation is interrupted:
 
 - **Race** (~25% of mazes, guaranteed at least every 4th) — two algorithms
-  search the *same* maze side by side, each colored and labeled. Since a
+  search the *same* maze side by side, each in its own accent color. Since a
   perfect maze has exactly one route between any two points, both would find
   the *identical* path — so the race that actually matters is the search
   itself: whichever algorithm finishes exploring first wins, and only its
@@ -187,13 +211,24 @@ Every few mazes, the normal rotation is interrupted:
 - Cells the search revisits (Wall Follower, Random Walk) get visibly
   brighter with each extra visit — a deliberate "heat" effect, not an
   accident (see the screenshot above).
+- The maze itself visibly builds — walls carve into existence following the
+  generator's actual order — before the search starts.
+- The exit sits green and hidden until it's found: it stays invisible for a
+  couple of quiet seconds after construction finishes, then fades in and
+  pulses gently, "waiting to be found," right up until a ball actually
+  reaches it — at which point it pops, rings, and switches to the winning
+  algorithm's color.
 - The solution trail grows behind the ball as it actually walks the path,
   drawn *over* the search pattern rather than replacing it.
 - A confetti burst on arrival, a faint sparkle trail during travel, and a
   short "N visited / M on path / efficiency%" stats readout before the next
   maze fades in.
-- The ambient color palette (walls, background, entry/exit markers — not the
-  algorithm colors) cycles through a handful of themes every 8 mazes, so a
+- Between mazes, the old one dissolves and the ball itself slides off the
+  exit edge while its mirror image slides in from the opposite edge of the
+  new maze — reinforcing the illusion of one continuous corridor wrapping
+  around the screen, rather than a hard cut to a new maze.
+- The ambient color palette (walls and background — not the algorithm
+  colors) cycles through a handful of themes every 8 mazes, so a
   screensaver left running for hours doesn't stay visually static.
 - The whole grid dynamically resizes to whatever window or screen it's
   given, at launch and on resize.
@@ -294,7 +329,7 @@ Sources/
 │   ├── MazeGrid.swift        grid, walls, edge openings
 │   ├── MazeGenerator.swift   Recursive Backtracker / Prim / Wilson
 │   ├── Pathfinding.swift     DFS / BFS / A* / Wall Follower / Random Walk
-│   ├── MazeEngine.swift      state machine: search -> settle -> travel -> arrive -> crossfade
+│   ├── MazeEngine.swift      state machine: build -> search -> settle -> travel -> arrive -> wrap
 │   └── MazeView.swift        Core Graphics rendering, effects, layout
 ├── MazeSaverApp/             Standalone windowed app (SwiftPM executable)
 │   └── main.swift

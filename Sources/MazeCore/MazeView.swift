@@ -7,30 +7,29 @@ public final class MazeView: NSView {
     private let footerHeight: CGFloat = 44
 
     private let headerColor = NSColor(calibratedRed: 0.02, green: 0.02, blue: 0.04, alpha: 1)
+    /// Entrance/exit markers are always this color — a fixed, functional signal
+    /// ("start"/"goal"), independent of the ambient theme or whatever's resting on them.
+    private let markerColor = NSColor(calibratedRed: 0.3, green: 1.0, blue: 0.45, alpha: 1)
 
-    /// Ambient palette (background/walls/entry markers) — cycles every `themeInterval`
-    /// mazes so a screensaver running for hours doesn't stay visually static. Algorithm
-    /// accent colors stay constant across themes since they're a functional color code.
+    /// Ambient palette (background/walls) — cycles every `themeInterval` mazes so a
+    /// screensaver running for hours doesn't stay visually static. Algorithm accent
+    /// colors (and the entrance/exit markers) stay constant across themes since
+    /// they're functional color codes, not decoration.
     private struct Theme {
         let name: String
         let background: NSColor
         let wall: NSColor
-        let marker: NSColor
     }
 
     private let themes: [Theme] = [
         Theme(name: "Midnight", background: NSColor(calibratedRed: 0.04, green: 0.04, blue: 0.07, alpha: 1),
-              wall: NSColor(calibratedRed: 0.55, green: 0.75, blue: 0.95, alpha: 0.9),
-              marker: NSColor(calibratedRed: 0.4, green: 1.0, blue: 0.5, alpha: 0.9)),
+              wall: NSColor(calibratedRed: 0.55, green: 0.75, blue: 0.95, alpha: 0.9)),
         Theme(name: "Sunset", background: NSColor(calibratedRed: 0.08, green: 0.03, blue: 0.05, alpha: 1),
-              wall: NSColor(calibratedRed: 1.0, green: 0.55, blue: 0.35, alpha: 0.9),
-              marker: NSColor(calibratedRed: 1.0, green: 0.85, blue: 0.3, alpha: 0.9)),
+              wall: NSColor(calibratedRed: 1.0, green: 0.55, blue: 0.35, alpha: 0.9)),
         Theme(name: "Matrix", background: NSColor(calibratedRed: 0.02, green: 0.05, blue: 0.02, alpha: 1),
-              wall: NSColor(calibratedRed: 0.3, green: 1.0, blue: 0.4, alpha: 0.85),
-              marker: NSColor(calibratedRed: 0.85, green: 1.0, blue: 0.5, alpha: 0.9)),
+              wall: NSColor(calibratedRed: 0.3, green: 1.0, blue: 0.4, alpha: 0.85)),
         Theme(name: "Frost", background: NSColor(calibratedRed: 0.03, green: 0.05, blue: 0.08, alpha: 1),
-              wall: NSColor(calibratedRed: 0.75, green: 0.92, blue: 1.0, alpha: 0.9),
-              marker: NSColor(calibratedRed: 0.6, green: 0.95, blue: 1.0, alpha: 0.9))
+              wall: NSColor(calibratedRed: 0.75, green: 0.92, blue: 1.0, alpha: 0.9))
     ]
     private let themeInterval = 8
 
@@ -44,9 +43,54 @@ public final class MazeView: NSView {
     /// How far into each runner's visitedOrder we've already scanned for dead-end
     /// backtrack jumps (see `spawnDeadEndPuffs`).
     private var lastScannedIndex: [Int] = []
+    /// Whether the exit-found flourish has already fired for this maze.
+    private var exitFoundFlashed = false
+    /// Seconds since the exit-found flourish fired — drives the marker's little
+    /// pop-and-settle bounce. `.infinity` while idle/long done.
+    private var exitFoundAge: Double = .infinity
+    private let exitFoundPopDuration: Double = 0.5
+    private let exitFoundRingDuration: Double = 0.7
+    /// Whether the maze was fully built last tick — used to detect the instant
+    /// construction finishes, which starts the appear-delay countdown.
+    private var exitMazeWasFullyBuilt = false
+    /// Counts up once the maze is fully built; once it reaches
+    /// `exitAppearDelayDuration`, `exitWaitingAge` starts. `.infinity` while idle.
+    private var exitAppearDelay: Double = .infinity
+    private let exitAppearDelayDuration: Double = 2.0
+    /// Seconds since the exit marker started actually appearing (after the delay
+    /// above) — drives its fade-in and the repeating "still waiting to be found"
+    /// pulse, separate from the one-shot found ring. `.infinity` until then.
+    private var exitWaitingAge: Double = .infinity
+    private let exitWaitingPulsePeriod: Double = 1.1
+    private let exitFadeInDuration: Double = 0.5
     private var lastSeenGeneration = -1
     private var particles: [Particle] = []
     private var puffs: [Puff] = []
+
+    /// Walls the "under construction" reveal has opened so far — incrementally
+    /// updated as `engine.builtCount` advances, one carve step at a time.
+    private var builtOpenWalls: Set<WallKey> = []
+    private var lastBuiltCount = 0
+    /// The carve step index at which each cell first becomes part of the maze —
+    /// used so unreached cells draw no walls at all during `.building` (a blank
+    /// void the maze grows into) instead of a dense fully-walled grid from frame one.
+    private var revealedCellIndex: [GridPos: Int] = [:]
+
+    private struct WallKey: Hashable {
+        let pos: GridPos
+        let dir: Direction
+    }
+
+    private static func computeRevealedCellIndex(entrance: EdgeOpening, grid: MazeGrid, carveSteps: [CarveStep]) -> [GridPos: Int] {
+        var result: [GridPos: Int] = [:]
+        result[grid.position(of: entrance)] = 0
+        for (i, step) in carveSteps.enumerated() {
+            if let next = grid.neighbor(of: step.from, direction: step.direction) {
+                result[next] = i + 1
+            }
+        }
+        return result
+    }
 
     private struct Particle {
         var position: NSPoint
@@ -141,7 +185,7 @@ public final class MazeView: NSView {
     /// settling pause right after) that's everyone; once actual travel starts,
     /// only the winner continues.
     private func activeRunnerIndices() -> [Int] {
-        if engine.isRace, engine.phase == .traveling || engine.phase == .arrived || engine.phase == .betweenMazes {
+        if engine.isRace, engine.phase == .traveling || engine.phase == .arrived || engine.phase == .wrapping {
             return engine.winnerRunnerIndex.map { [$0] } ?? Array(engine.runners.indices)
         }
         return Array(engine.runners.indices)
@@ -154,6 +198,58 @@ public final class MazeView: NSView {
             lastSeenGeneration = engine.mazeGeneration
             previousFinished = Array(repeating: false, count: engine.runners.count)
             lastScannedIndex = Array(repeating: 0, count: engine.runners.count)
+            builtOpenWalls = []
+            lastBuiltCount = 0
+            exitFoundFlashed = false
+            exitFoundAge = .infinity
+            exitMazeWasFullyBuilt = false
+            exitAppearDelay = .infinity
+            exitWaitingAge = .infinity
+            revealedCellIndex = MazeView.computeRevealedCellIndex(entrance: engine.entrance, grid: engine.grid, carveSteps: engine.carveSteps)
+        }
+
+        // The instant the maze finishes building, start a 2-second countdown
+        // during which the exit stays completely invisible — only after that does
+        // it start fading in and pulsing "still waiting to be found".
+        let mazeFullyBuiltNow = isMazeFullyBuilt()
+        if mazeFullyBuiltNow, !exitMazeWasFullyBuilt {
+            exitAppearDelay = 0
+        }
+        exitMazeWasFullyBuilt = mazeFullyBuiltNow
+
+        if exitAppearDelay < .infinity, exitWaitingAge == .infinity {
+            exitAppearDelay += dt
+            if exitAppearDelay >= exitAppearDelayDuration {
+                exitWaitingAge = 0
+            }
+        }
+        if exitWaitingAge < .infinity, !exitFound() {
+            exitWaitingAge += dt
+        }
+
+        // A theatrical little flourish right as the exit marker flips from green
+        // to the algorithm's color — the moment the path is actually found: a
+        // bigger confetti burst, a bright expanding ring, and the marker itself
+        // pops past its normal size before settling back (see `drawMarkers` /
+        // `drawExitFoundRing`).
+        if !exitFoundFlashed, exitFound() {
+            exitFoundFlashed = true
+            exitFoundAge = 0
+            let color = currentLeadKind().map(accentColor(for:)) ?? markerColor
+            let exitCenter = rect(for: engine.grid.position(of: engine.exit))
+            spawnConfetti(at: NSPoint(x: exitCenter.midX, y: exitCenter.midY), color: color, count: 48, speedRange: 90...240)
+        }
+        if exitFoundAge < .infinity {
+            exitFoundAge += dt
+        }
+
+        while lastBuiltCount < engine.builtCount {
+            let step = engine.carveSteps[lastBuiltCount]
+            builtOpenWalls.insert(WallKey(pos: step.from, dir: step.direction))
+            if let neighbor = engine.grid.neighbor(of: step.from, direction: step.direction) {
+                builtOpenWalls.insert(WallKey(pos: neighbor, dir: step.direction.opposite))
+            }
+            lastBuiltCount += 1
         }
 
         let active = Set(activeRunnerIndices())
@@ -214,10 +310,10 @@ public final class MazeView: NSView {
         lastScannedIndex[i] = upTo
     }
 
-    private func spawnConfetti(at point: NSPoint, color: NSColor) {
-        for _ in 0..<24 {
+    private func spawnConfetti(at point: NSPoint, color: NSColor, count: Int = 24, speedRange: ClosedRange<CGFloat> = 60...170) {
+        for _ in 0..<count {
             let angle = CGFloat.random(in: 0..<(2 * .pi))
-            let speed = CGFloat.random(in: 60...170)
+            let speed = CGFloat.random(in: speedRange)
             let velocity = NSPoint(x: cos(angle) * speed, y: sin(angle) * speed)
             let life = CGFloat.random(in: 0.5...0.9)
             particles.append(Particle(position: point, velocity: velocity, life: life, maxLife: life, color: color))
@@ -245,41 +341,52 @@ public final class MazeView: NSView {
         currentTheme.background.setFill()
         ctx.fill(bounds)
 
-        if engine.phase == .betweenMazes,
-           let pendingGrid = engine.pendingGrid, let pendingEntrance = engine.pendingEntrance, let pendingExit = engine.pendingExit {
-            let progress = CGFloat(engine.transitionProgress)
-            let nextTheme = theme(for: engine.mazeGeneration + 1)
-
-            // Old maze, fading out: its search pattern, walls, markers, the fully-
-            // travelled trail drawn over it, and the ball resting at the exit.
-            ctx.saveGState()
-            ctx.setAlpha(1 - progress)
-            drawVisitedCells(ctx)
-            drawWalls(ctx, grid: engine.grid, cols: engine.cols, rows: engine.rows, color: currentTheme.wall)
-            drawMarkers(ctx, grid: engine.grid, entrance: engine.entrance, exit: engine.exit, color: currentTheme.marker)
-            drawTravelTrail(ctx)
-            drawBalls(ctx)
-            ctx.restoreGState()
-
-            // Next maze's structure, fading in ahead of its search starting.
-            ctx.saveGState()
-            ctx.setAlpha(progress)
-            drawWalls(ctx, grid: pendingGrid, cols: engine.cols, rows: engine.rows, color: nextTheme.wall)
-            drawMarkers(ctx, grid: pendingGrid, entrance: pendingEntrance, exit: pendingExit, color: nextTheme.marker)
-            ctx.restoreGState()
-        } else {
-            drawVisitedCells(ctx)
-            drawPuffs(ctx)
-            drawWalls(ctx, grid: engine.grid, cols: engine.cols, rows: engine.rows, color: currentTheme.wall)
-            drawMarkers(ctx, grid: engine.grid, entrance: engine.entrance, exit: engine.exit, color: currentTheme.marker)
-            drawTravelTrail(ctx)
-            drawBalls(ctx)
-            // Shown through the search and the settling pause, gone once travel starts.
-            if let winner = engine.winnerRunnerIndex, engine.phase == .searching || engine.phase == .settling {
-                drawWinnerBanner(ctx, runnerIndex: winner)
-            }
-            drawStatsBanner(ctx)
+        if engine.phase == .arriving {
+            drawArrivalPing(ctx)
+            drawHeader()
+            drawFooter()
+            return
         }
+
+        if engine.phase == .wrapping {
+            drawWrapAnimation(ctx)
+            drawHeader()
+            drawFooter()
+            return
+        }
+
+        drawVisitedCells(ctx)
+        drawPuffs(ctx)
+        if engine.phase == .building {
+            let builtCount = engine.builtCount
+            drawWalls(ctx, grid: engine.grid, cols: engine.cols, rows: engine.rows, color: currentTheme.wall, hasWallOverride: { [grid = engine.grid, builtOpenWalls, revealedCellIndex] pos, dir in
+                let posRevealed = (revealedCellIndex[pos] ?? .max) <= builtCount
+                let neighborRevealed = grid.neighbor(of: pos, direction: dir).map { (revealedCellIndex[$0] ?? .max) <= builtCount } ?? false
+                guard posRevealed || neighborRevealed else { return false }
+                return !builtOpenWalls.contains(WallKey(pos: pos, dir: dir))
+            })
+        } else {
+            drawWalls(ctx, grid: engine.grid, cols: engine.cols, rows: engine.rows, color: currentTheme.wall)
+        }
+        // Markers drawn before the ball: a resting ball (its own true or blending
+        // color) should show on top rather than being masked by the marker
+        // underneath it. During .building, still gated to cells the construction
+        // has actually reached.
+        if engine.phase == .building {
+            let builtCount = engine.builtCount
+            drawMarkers(ctx, grid: engine.grid, entrance: engine.entrance, exit: engine.exit, revealFilter: { [revealedCellIndex] pos in
+                (revealedCellIndex[pos] ?? .max) <= builtCount
+            })
+        } else {
+            drawMarkers(ctx, grid: engine.grid, entrance: engine.entrance, exit: engine.exit)
+        }
+        drawTravelTrail(ctx)
+        drawBalls(ctx)
+        // Shown through the search and the settling pause, gone once travel starts.
+        if let winner = engine.winnerRunnerIndex, engine.phase == .searching || engine.phase == .settling {
+            drawWinnerBanner(ctx, runnerIndex: winner)
+        }
+        drawStatsBanner(ctx)
 
         drawConfetti(ctx)
         drawHeader()
@@ -288,12 +395,17 @@ public final class MazeView: NSView {
 
     private func drawVisitedCells(_ ctx: CGContext) {
         // Left in place through settling and the travel itself — the search isn't
-        // erased, the solution trail simply gets drawn on top of it.
-        guard engine.phase == .searching || engine.phase == .settling || engine.phase == .traveling || engine.phase == .arrived || engine.phase == .betweenMazes else { return }
+        // erased, the solution trail simply gets drawn on top of it. Also drawn
+        // (explicitly, by drawWrapAnimation) during the brief .wrapping fade-out.
+        guard engine.phase == .searching || engine.phase == .settling || engine.phase == .traveling || engine.phase == .arrived || engine.phase == .wrapping else { return }
         // Kept short so the head ball (drawn later, on top) reads as the "current
         // position" marker instead of blending into a long trail of bright squares.
         let frontierWindow = 3
         let inset = cellSize * 0.12
+        // A square's corners poke out past an inscribed circle, so once the exit
+        // has actually been found, its highlight square would show past the edges
+        // of the ball resting there — exclude it, the ball alone is enough.
+        let hiddenPos = exitFound() ? engine.grid.position(of: engine.exit) : nil
 
         for runner in engine.runners {
             let order = runner.searchResult.visitedOrder
@@ -313,13 +425,13 @@ public final class MazeView: NSView {
                 visitCounts[order[i], default: 0] += 1
             }
 
-            for (pos, count) in visitCounts {
+            for (pos, count) in visitCounts where pos != hiddenPos {
                 let alpha = min(0.75, 0.35 + 0.12 * CGFloat(count - 1))
                 accent.withAlphaComponent(alpha).setFill()
                 ctx.fill(rect(for: pos).insetBy(dx: inset, dy: inset))
             }
 
-            for i in frontierStart..<revealed {
+            for i in frontierStart..<revealed where order[i] != hiddenPos {
                 frontierColor.setFill()
                 ctx.fill(rect(for: order[i]).insetBy(dx: inset, dy: inset))
             }
@@ -328,10 +440,9 @@ public final class MazeView: NSView {
 
     /// Draws the solved path from the entrance up to the ball's current position —
     /// no separate "preview" pass, the trail simply grows as the ball actually
-    /// walks it. During the crossfade this naturally shows the fully-walked path,
-    /// fading out with the rest of the old maze.
+    /// walks it.
     private func drawTravelTrail(_ ctx: CGContext) {
-        guard engine.phase == .traveling || engine.phase == .arrived || engine.phase == .betweenMazes else { return }
+        guard engine.phase == .traveling || engine.phase == .arrived || engine.phase == .wrapping else { return }
 
         for i in activeRunnerIndices() {
             let runner = engine.runners[i]
@@ -364,31 +475,35 @@ public final class MazeView: NSView {
         }
     }
 
-    private func drawWalls(_ ctx: CGContext, grid: MazeGrid, cols: Int, rows: Int, color: NSColor) {
+    private func drawWalls(_ ctx: CGContext, grid: MazeGrid, cols: Int, rows: Int, color: NSColor, hasWallOverride: ((GridPos, Direction) -> Bool)? = nil) {
         color.setStroke()
         ctx.setLineWidth(max(1.5, cellSize * 0.08))
         ctx.setLineCap(.round)
         ctx.beginPath()
 
+        func hasWall(_ pos: GridPos, _ dir: Direction) -> Bool {
+            hasWallOverride?(pos, dir) ?? grid.hasWall(pos, dir)
+        }
+
         for row in 0..<rows {
             for col in 0..<cols {
                 let pos = GridPos(col: col, row: row)
                 let r = rect(for: pos)
-                if grid.hasWall(pos, .north) {
+                if hasWall(pos, .north) {
                     ctx.move(to: CGPoint(x: r.minX, y: r.minY))
                     ctx.addLine(to: CGPoint(x: r.maxX, y: r.minY))
                 }
-                if grid.hasWall(pos, .west) {
+                if hasWall(pos, .west) {
                     ctx.move(to: CGPoint(x: r.minX, y: r.minY))
                     ctx.addLine(to: CGPoint(x: r.minX, y: r.maxY))
                 }
                 // Only the last row/column need to draw their south/east walls;
                 // interior south/east walls are shared with the next cell's north/west.
-                if row == rows - 1, grid.hasWall(pos, .south) {
+                if row == rows - 1, hasWall(pos, .south) {
                     ctx.move(to: CGPoint(x: r.minX, y: r.maxY))
                     ctx.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
                 }
-                if col == cols - 1, grid.hasWall(pos, .east) {
+                if col == cols - 1, hasWall(pos, .east) {
                     ctx.move(to: CGPoint(x: r.maxX, y: r.minY))
                     ctx.addLine(to: CGPoint(x: r.maxX, y: r.maxY))
                 }
@@ -397,59 +512,234 @@ public final class MazeView: NSView {
         ctx.strokePath()
     }
 
-    private func drawMarkers(_ ctx: CGContext, grid: MazeGrid, entrance: EdgeOpening, exit: EdgeOpening, color: NSColor) {
-        color.setFill()
-        let entrancePos = grid.position(of: entrance)
-        let exitPos = grid.position(of: exit)
-        for pos in [entrancePos, exitPos] {
-            let r = rect(for: pos).insetBy(dx: cellSize * 0.35, dy: cellSize * 0.35)
-            let path = NSBezierPath(ovalIn: r)
-            path.fill()
+    /// The current maze's lead algorithm (the winner once a race is decided,
+    /// otherwise the sole runner) — used to color the entrance marker and the
+    /// exit marker once it's been reached.
+    private func currentLeadKind() -> SearchAlgorithmKind? {
+        let i = engine.leadRunnerIndex
+        if engine.runners.indices.contains(i) { return engine.runners[i].kind }
+        return engine.runners.first?.kind
+    }
+
+    /// True once the path to the exit has actually been *found* — not once the
+    /// ball has walked there. In a race that's the moment a winner is decided;
+    /// otherwise once the search reveal reaches the goal (i.e. `.settling` onward).
+    private func exitFound() -> Bool {
+        engine.winnerRunnerIndex != nil || engine.phase == .settling || engine.phase == .traveling || engine.phase == .arrived
+    }
+
+    /// Whether the maze itself is fully built and on screen right now — false
+    /// during `.building` (still under construction), and during
+    /// `.arriving`/`.wrapping` when no maze/markers are shown at all.
+    private func isMazeFullyBuilt() -> Bool {
+        switch engine.phase {
+        case .arriving, .wrapping, .building:
+            return false
+        default:
+            return true
         }
     }
 
+    /// The entrance marker always matches the current algorithm's color; the exit
+    /// marker stays green — a beacon for "not found yet" — until the search
+    /// actually finds it, at which point it takes on the algorithm's color too.
+    private func drawMarkers(_ ctx: CGContext, grid: MazeGrid, entrance: EdgeOpening, exit: EdgeOpening, revealFilter: ((GridPos) -> Bool)? = nil) {
+        let entrancePos = grid.position(of: entrance)
+        let exitPos = grid.position(of: exit)
+        let leadColor = currentLeadKind().map(accentColor(for:)) ?? markerColor
+        let baseRadius = cellSize * 0.42
+
+        // The exit briefly pops past its normal size and settles back right when
+        // it's found — a little punctuation for the moment, not a permanent change.
+        let exitPopScale: CGFloat = {
+            guard exitFoundAge < exitFoundPopDuration else { return 1 }
+            let t = CGFloat(exitFoundAge / exitFoundPopDuration)
+            return 1 + 0.7 * (1 - t) * (1 - t)
+        }()
+
+        // Eases in rather than popping straight to full opacity the instant
+        // construction reaches it.
+        let exitFadeAlpha: CGFloat = exitWaitingAge < .infinity ? CGFloat(min(1, exitWaitingAge / exitFadeInDuration)) : 0
+        let exitColor = (exitFound() ? leadColor : markerColor).withAlphaComponent(exitFadeAlpha)
+
+        for (pos, color, radius) in [(entrancePos, leadColor, baseRadius), (exitPos, exitColor, baseRadius * exitPopScale)] {
+            guard revealFilter?(pos) ?? true else { continue }
+            color.setFill()
+            let center = rect(for: pos)
+            let r = NSRect(x: center.midX - radius, y: center.midY - radius, width: radius * 2, height: radius * 2)
+            NSBezierPath(ovalIn: r).fill()
+        }
+
+        drawExitFoundRing(ctx, color: leadColor)
+        drawExitWaitingPulse(ctx)
+    }
+
+    /// A gentle, repeating expanding ring around the still-green exit marker,
+    /// starting the instant it first appears — so it reads as "still waiting to
+    /// be found" instead of just abruptly popping into existence and sitting there.
+    /// Stops the moment the path is actually found (the one-shot ring takes over).
+    private func drawExitWaitingPulse(_ ctx: CGContext) {
+        guard exitWaitingAge < .infinity, !exitFound() else { return }
+        let pos = engine.grid.position(of: engine.exit)
+        let center = rect(for: pos)
+        let mid = NSPoint(x: center.midX, y: center.midY)
+
+        let phaseInPulse = exitWaitingAge.truncatingRemainder(dividingBy: exitWaitingPulsePeriod) / exitWaitingPulsePeriod
+        let baseRadius = cellSize * 0.42
+        let ringRadius = baseRadius + cellSize * 0.9 * CGFloat(phaseInPulse)
+        let fadeAlpha = CGFloat(min(1, exitWaitingAge / exitFadeInDuration))
+        let ringAlpha = (1 - CGFloat(phaseInPulse)) * 0.6 * fadeAlpha
+
+        markerColor.withAlphaComponent(ringAlpha).setStroke()
+        let ring = NSBezierPath(ovalIn: NSRect(x: mid.x - ringRadius, y: mid.y - ringRadius, width: ringRadius * 2, height: ringRadius * 2))
+        ring.lineWidth = max(1.5, cellSize * 0.06)
+        ring.stroke()
+    }
+
+    /// A bright, one-shot expanding-and-fading ring at the exit, launched the
+    /// instant the path is found — the "ta-da" moment.
+    private func drawExitFoundRing(_ ctx: CGContext, color: NSColor) {
+        guard exitFoundAge < exitFoundRingDuration else { return }
+        let pos = engine.grid.position(of: engine.exit)
+        let r = rect(for: pos)
+        let center = NSPoint(x: r.midX, y: r.midY)
+
+        let t = CGFloat(exitFoundAge / exitFoundRingDuration)
+        let radius = cellSize * 0.42 + cellSize * 1.8 * t
+        color.withAlphaComponent((1 - t) * 0.85).setStroke()
+        let ring = NSBezierPath(ovalIn: NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2))
+        ring.lineWidth = max(2, cellSize * 0.1) * (1 - t * 0.6)
+        ring.stroke()
+    }
+
+    /// The `.arriving` phase: just the entrance point sitting there, with a
+    /// quiet, repeating ping ring — before any maze structure is drawn at all.
+    /// Still in the *previous* maze's algorithm color; it only eases into the new
+    /// one during `.building` (see `ballColor(for:)`).
+    private func drawArrivalPing(_ ctx: CGContext) {
+        let color = engine.previousLeadKind.map(accentColor(for:)) ?? markerColor
+        let pos = engine.grid.position(of: engine.entrance)
+        let r = rect(for: pos)
+        let center = NSPoint(x: r.midX, y: r.midY)
+        let markerRadius = cellSize * 0.42
+
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: center.x - markerRadius, y: center.y - markerRadius, width: markerRadius * 2, height: markerRadius * 2)).fill()
+
+        let pulsePeriod = 0.9
+        let maxPulseRadius = cellSize * 1.4
+        let phaseInPulse = engine.arrivingElapsed.truncatingRemainder(dividingBy: pulsePeriod) / pulsePeriod
+        let ringRadius = markerRadius + (maxPulseRadius - markerRadius) * CGFloat(phaseInPulse)
+        let ringAlpha = (1 - CGFloat(phaseInPulse)) * 0.7
+
+        color.withAlphaComponent(ringAlpha).setStroke()
+        let ring = NSBezierPath(ovalIn: NSRect(x: center.x - ringRadius, y: center.y - ringRadius, width: ringRadius * 2, height: ringRadius * 2))
+        ring.lineWidth = max(1.5, cellSize * 0.06)
+        ring.stroke()
+    }
+
+    /// Outward screen-space direction for a border side (`isFlipped`, so "north"
+    /// — up, toward row 0 — is -y, matching how `rect(for:)` lays out rows).
+    private func screenDirection(for side: Side) -> (dx: CGFloat, dy: CGFloat) {
+        switch side {
+        case .west: return (-1, 0)
+        case .east: return (1, 0)
+        case .north: return (0, -1)
+        case .south: return (0, 1)
+        }
+    }
+
+    /// The `.wrapping` phase: the maze is gone entirely — just the pulsing ball,
+    /// sliding off the exit edge while its mirror slides in from the opposite
+    /// edge (the new maze's entrance side), landing exactly where `.arriving`'s
+    /// ping will pick it up.
+    private let wrapFadeOutDuration: Double = 0.6
+    /// A calm beat after the fade-out — just the pulsing ball sitting still —
+    /// before it actually starts sliding toward the edge.
+    private let wrapPauseDuration: Double = 1.0
+
+    private func drawWrapAnimation(_ ctx: CGContext) {
+        guard let pendingGrid = engine.pendingGrid, let pendingEntrance = engine.pendingEntrance else { return }
+
+        // The old maze gently fades out rather than cutting away instantly — just
+        // for the first beat of the wrap, underneath the ball animation.
+        if engine.wrapElapsed < wrapFadeOutDuration {
+            let currentTheme = theme(for: engine.mazeGeneration)
+            let alpha = 1 - CGFloat(engine.wrapElapsed / wrapFadeOutDuration)
+            ctx.saveGState()
+            ctx.setAlpha(alpha)
+            drawVisitedCells(ctx)
+            drawWalls(ctx, grid: engine.grid, cols: engine.cols, rows: engine.rows, color: currentTheme.wall)
+            drawMarkers(ctx, grid: engine.grid, entrance: engine.entrance, exit: engine.exit)
+            drawTravelTrail(ctx)
+            drawBalls(ctx)
+            ctx.restoreGState()
+        }
+
+        // Still the current maze's algorithm color — it only starts easing toward
+        // the new maze's algorithm once building begins (see `ballColor(for:)`).
+        let color = currentLeadKind().map(accentColor(for:)) ?? markerColor
+
+        let dir = screenDirection(for: engine.exit.side)
+        let exitRest = rect(for: engine.grid.position(of: engine.exit))
+        let exitRestPoint = NSPoint(x: exitRest.midX, y: exitRest.midY)
+        let entranceRest = rect(for: pendingGrid.position(of: pendingEntrance))
+        let entranceRestPoint = NSPoint(x: entranceRest.midX, y: entranceRest.midY)
+
+        // Fade out, then a beat of stillness (just pulsing in place), and only
+        // then does it actually start sliding — the pause matters as much as the
+        // motion for making this read as deliberate rather than rushed.
+        let slideStart = wrapFadeOutDuration + wrapPauseDuration
+        let slideDuration = max(0.1, engine.wrapTotalDuration - slideStart)
+        let t = CGFloat(min(1, max(0, engine.wrapElapsed - slideStart) / slideDuration))
+        let farDistance = cellSize * 3
+        let exitPoint = NSPoint(x: exitRestPoint.x + dir.dx * farDistance * t, y: exitRestPoint.y + dir.dy * farDistance * t)
+        let entrancePoint = NSPoint(x: entranceRestPoint.x - dir.dx * farDistance * (1 - t), y: entranceRestPoint.y - dir.dy * farDistance * (1 - t))
+
+        let baseRadius = cellSize * 0.42
+        // Pulses continuously through the whole phase (fade, pause, and slide)
+        // rather than tracking slide progress, which would freeze it during the pause.
+        let pulse = 1 + 0.18 * sin(engine.wrapElapsed * 6)
+        let radius = baseRadius * CGFloat(pulse)
+
+        for point in [exitPoint, entrancePoint] {
+            ctx.saveGState()
+            ctx.setShadow(offset: .zero, blur: cellSize * 0.9, color: color.cgColor)
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)).fill()
+            ctx.restoreGState()
+        }
+    }
+
+    /// During `.building`, the ball eases from the *previous* maze's algorithm
+    /// color into this one's over the course of the animation, instead of
+    /// snapping straight to it. Every other phase just shows the current color.
+    private func ballColor(for runner: Runner) -> NSColor {
+        let newColor = accentColor(for: runner.kind)
+        guard engine.phase == .building, let oldKind = engine.previousLeadKind else { return newColor }
+        let blend = engine.carveSteps.isEmpty ? 1 : CGFloat(engine.builtCount) / CGFloat(engine.carveSteps.count)
+        return accentColor(for: oldKind).blended(withFraction: blend, of: newColor) ?? newColor
+    }
+
     private func drawBalls(_ ctx: CGContext) {
-        // The name tag and the emphasized "head" styling only make sense while the
-        // ball is riding the search frontier (or resting there during the settling
-        // pause right after); once it replays the found path, a plain ball is
-        // enough — and in a race, only the winner's ball is shown from that point on.
-        let isSearchHead = engine.phase == .searching || engine.phase == .settling
-        let showRaceStyling = engine.isRace && isSearchHead
+        // Color alone identifies the algorithm now (header/footer, markers, ball
+        // all agree), so no floating name tag is needed. Size stays constant
+        // throughout (matching the markers) except for the race side-by-side bump.
+        let showRaceStyling = engine.isRace && (engine.phase == .searching || engine.phase == .settling)
 
         for i in activeRunnerIndices() {
             let runner = engine.runners[i]
-            let color = accentColor(for: runner.kind)
+            let color = ballColor(for: runner)
             let center = screenPoint(forRunner: i)
-            let baseRadius: CGFloat = isSearchHead ? 0.42 : 0.3
+            let baseRadius: CGFloat = 0.42
             let radius = cellSize * (showRaceStyling ? baseRadius * 1.15 : baseRadius)
             let ballRect = NSRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
 
             ctx.saveGState()
-            ctx.setShadow(offset: .zero, blur: cellSize * (isSearchHead ? 0.9 : 0.6), color: color.cgColor)
+            ctx.setShadow(offset: .zero, blur: cellSize * 0.75, color: color.cgColor)
             color.setFill()
             NSBezierPath(ovalIn: ballRect).fill()
             ctx.restoreGState()
-
-            if isSearchHead {
-                NSColor.white.withAlphaComponent(0.9).setStroke()
-                let ring = NSBezierPath(ovalIn: ballRect.insetBy(dx: -2, dy: -2))
-                ring.lineWidth = 1.5
-                ring.stroke()
-            }
-
-            guard isSearchHead else { continue }
-
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .bold),
-                .foregroundColor: color
-            ]
-            let label = runner.kind.shortName as NSString
-            let labelSize = label.size(withAttributes: attrs)
-            let labelOrigin = NSPoint(x: center.x - labelSize.width / 2, y: center.y - radius - labelSize.height - 4)
-            let backing = NSRect(x: labelOrigin.x - 3, y: labelOrigin.y - 1, width: labelSize.width + 6, height: labelSize.height + 2)
-            NSColor(calibratedWhite: 0, alpha: 0.55).setFill()
-            NSBezierPath(roundedRect: backing, xRadius: 3, yRadius: 3).fill()
-            label.draw(at: labelOrigin, withAttributes: attrs)
         }
     }
 

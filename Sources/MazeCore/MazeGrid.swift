@@ -13,7 +13,7 @@ enum Side: CaseIterable {
     }
 }
 
-enum Direction: CaseIterable {
+enum Direction: CaseIterable, Hashable {
     case north, south, east, west
 
     var opposite: Direction {
